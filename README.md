@@ -7,8 +7,7 @@ Practical DevOps training guide covering deployment of a fullstack NextJS app wi
 - `chapters/` — 20 modular markdown chapters (the source of truth):
   - Chapters 1–12: Docker Compose, Jenkins, production deployment
   - Chapters 13–20: Kubernetes extension (Minikube, kubectl, Helm, Ingress, StatefulSets, HPA)
-- `practical_nextjs_docker_compose_jenkins_training_guide.md` — legacy monolithic guide (superseded by chapters)
-- `.pdf` / `.docx` — generated exports of the legacy guide
+- `full-guide/` — the complete guide combined into a single document (markdown, PDF, DOCX)
 
 ## Chapter Overview
 
