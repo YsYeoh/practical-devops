@@ -159,7 +159,7 @@ pipeline {
         stage('Deploy Containers') {
             steps {
                 withCredentials([file(credentialsId: 'app-env-file', variable: 'ENV_FILE')]) {
-                    sh 'cp "$ENV_FILE" .env'
+                    sh 'rm -f .env && cp "$ENV_FILE" .env && chmod 600 .env'
                 }
                 sh 'docker compose up -d'
             }
@@ -203,14 +203,15 @@ The `prune -f` command removes:
 
 ```groovy
 withCredentials([file(credentialsId: 'app-env-file', variable: 'ENV_FILE')]) {
-    sh 'cp "$ENV_FILE" .env'
+    sh 'rm -f .env && cp "$ENV_FILE" .env && chmod 600 .env'
 }
 ```
 
 1. Jenkins decrypts the uploaded Secret file for this build only
 2. It exposes the path to the temporary file as the `ENV_FILE` environment variable
 3. The `cp` command copies it to `.env` in the workspace where `docker compose` expects it
-4. Jenkins deletes the temporary file when the stage finishes
+4. Any leftover read-only `.env` from a previous build is removed first (`rm -f .env`)
+5. Jenkins deletes the temporary credential file when the stage finishes
 
 The `.env` file never appears in Git, never sits permanently on disk in the workspace, and is not printed in the console output.
 
@@ -255,11 +256,26 @@ sudo systemctl restart jenkins
 
 ---
 
-## Part 6: Set Up Automatic Deployment with Webhooks
+## Part 6: Automatic Builds (Webhooks or Polling)
 
-Now configure GitHub to notify Jenkins whenever you push code.
+When you push code, you want Jenkins to run the pipeline without clicking **Build Now** every time.
 
-### Step 6.1 — Add a Webhook in GitHub
+There are two common approaches:
+
+| Approach | Jenkins location | How it works |
+|---|---|---|
+| **GitHub webhook** (Part 6A) | Cloud server with a public IP | GitHub sends an HTTP request to Jenkins after each push |
+| **Poll SCM** (Part 6B) | Local laptop, home network, no public URL | Jenkins checks GitHub every few minutes for new commits |
+
+> **Practicing on your Ubuntu laptop?** Skip Part 6A and use **Part 6B (Poll SCM)**. GitHub cannot reach `localhost` or a private home IP, so webhooks will always fail unless you expose Jenkins with a tunnel (see Troubleshooting).
+
+---
+
+## Part 6A: Set Up Automatic Deployment with Webhooks (Cloud Server)
+
+Use this when Jenkins runs on a server with a **public IP address** (AWS EC2, DigitalOcean, etc.).
+
+### Step 6A.1 — Add a Webhook in GitHub
 
 1. Go to your GitHub repository → **Settings** → **Webhooks** → **Add webhook**
 2. Fill in:
@@ -274,7 +290,7 @@ Now configure GitHub to notify Jenkins whenever you push code.
 
 > **Note:** The trailing slash in `github-webhook/` is required.
 
-### Step 6.2 — Verify the Webhook
+### Step 6A.2 — Verify the Webhook
 
 After adding the webhook, GitHub sends a test ping. In the webhook settings page, you should see a green checkmark indicating the ping was delivered successfully.
 
@@ -283,7 +299,7 @@ If the ping failed:
 - Check your server's firewall: `sudo ufw status`
 - Check your cloud provider's firewall/security group settings
 
-### Step 6.3 — Configure Jenkins to Accept Webhooks
+### Step 6A.3 — Configure Jenkins to Accept Webhooks
 
 Jenkins should be ready to receive webhooks automatically if the **GitHub Integration Plugin** is installed.
 
@@ -295,6 +311,64 @@ To verify:
 4. If you see errors, add your GitHub server credentials:
 
    - Click **Add GitHub Server** → **Credentials** → Add your `github-token`
+
+---
+
+## Part 6B: Automatic Builds on a Local Laptop (Poll SCM)
+
+If Jenkins runs on your laptop and is **not** reachable from the internet, use **Poll SCM** instead of webhooks. Jenkins periodically asks GitHub “any new commits?” and starts a build when it finds one.
+
+No port forwarding, no tunnel, no public URL required.
+
+### Step 6B.1 — Enable Poll SCM on the Pipeline Job
+
+1. Open your pipeline job (`practical-devops-pipeline`) → **Configure**
+2. Scroll to **Build Triggers**
+3. Check **Poll SCM**
+4. In **Schedule**, enter:
+
+   ```
+   H/2 * * * *
+   ```
+
+   This checks GitHub roughly every 2 minutes (the `H` spreads load so builds don’t all start on the hour).
+
+5. Click **Save**
+
+### Step 6B.2 — Test Polling
+
+1. Make a small change in your project and push to `main`:
+
+   ```bash
+   git add .
+   git commit -m "Test poll SCM trigger"
+   git push origin main
+   ```
+
+2. Wait up to 2 minutes — do **not** click **Build Now**
+3. A new build should appear automatically in **Build History**
+
+> Polling is slightly slower than webhooks (up to one poll interval delay). For local practice that is perfectly fine.
+
+### Optional: Poll Schedule in the Jenkinsfile
+
+Instead of configuring the job in the UI, you can add a trigger block to your `Jenkinsfile`:
+
+```groovy
+pipeline {
+    agent any
+
+    triggers {
+        pollSCM('H/2 * * * *')
+    }
+
+    stages {
+        // ... existing stages ...
+    }
+}
+```
+
+Commit and push this change. Jenkins reads the trigger from the file on the next run.
 
 ---
 
@@ -321,7 +395,7 @@ git push origin main
 
 ### Step 7.3 — Watch the Automation
 
-1. In Jenkins, your pipeline should trigger automatically within seconds of the push
+1. In Jenkins, a new build should appear within a few minutes of the push (webhook: seconds; Poll SCM: up to one poll interval)
 2. Watch the console output as Jenkins:
    - Clones the latest code
    - Rebuilds Docker images
@@ -335,9 +409,11 @@ git push origin main
 ```
 Developer pushes code to GitHub
         ↓
-GitHub webhook fires (HTTP POST to Jenkins)
+Trigger (one of):
+  • GitHub webhook → Jenkins        (cloud server, Part 6A)
+  • Jenkins Poll SCM checks GitHub  (local laptop, Part 6B)
         ↓
-Jenkins pipeline triggers
+Jenkins pipeline starts
         ↓
 Clones the latest code
         ↓
@@ -361,9 +437,8 @@ Before moving on, confirm:
 - [x] Jenkins can manually run the pipeline and it completes successfully
 - [x] Secret file credential `app-env-file` is configured in Jenkins
 - [x] The `Jenkinsfile` is committed to your GitHub repository
-- [x] GitHub webhook is configured and the test ping succeeded
-- [x] Jenkins pipeline triggers automatically when you push code
-- [x] The application updates after a Git push without manual intervention
+- [x] Automatic builds work after a push — via **webhook** (Part 6A, cloud server) **or Poll SCM** (Part 6B, local laptop)
+- [x] The application updates after a Git push without clicking **Build Now**
 
 ---
 
@@ -373,11 +448,13 @@ Before moving on, confirm:
 |---|---|
 | `docker: command not found` in Jenkins pipeline | Jenkins user not in docker group. Run `sudo usermod -aG docker jenkins && sudo systemctl restart jenkins` |
 | `Host key verification failed` when cloning | Jenkins cannot verify the GitHub host key. Run this once as the jenkins user: `sudo -u jenkins ssh-keyscan github.com >> ~jenkins/.ssh/known_hosts` |
-| Webhook ping returns `301` or `Connection refused` | Jenkins may not be accessible from the internet. Check firewall (UFW) and cloud security group. For testing, you can use `ngrok` to expose port 8080 |
+| Webhook ping returns `301` or `Connection refused` | Jenkins is not reachable from the internet. On a local laptop, use **Poll SCM** (Part 6B) instead of webhooks. On a cloud server, check firewall (UFW) and security group. For a one-off webhook test, use `ngrok http 8080` to get a temporary public URL |
+| Webhook not an option (local laptop practice) | Normal — GitHub cannot call `localhost`. Enable **Poll SCM** with schedule `H/2 * * * *` (Part 6B) |
 | Pipeline fails at `docker compose build` | Ensure the Jenkinsfile's working directory contains `docker-compose.yml`. The `git` step should clone into the workspace |
 | `permission denied while trying to connect to the Docker daemon` | Jenkins user needs docker group membership and a restart |
 | `env file .../.env not found` when running `docker compose up` | `.env` is not in Git. Add the **Secret file** credential `app-env-file` in Jenkins (Part 3) and ensure the `Jenkinsfile` deploy stage uses `withCredentials` |
 | `Could not find credentials entry with ID 'app-env-file'` | Create the Secret file credential with ID exactly `app-env-file`, or update the `credentialsId` in the `Jenkinsfile` to match your credential ID |
+| `cp: cannot create regular file '.env': Permission denied` | A read-only `.env` already exists in the workspace from a previous build. Use `rm -f .env && cp ...` in the Jenkinsfile (see Part 4), or run `sudo rm /var/lib/jenkins/workspace/practical-devops-pipeline/.env` once and rebuild |
 
 ---
 
