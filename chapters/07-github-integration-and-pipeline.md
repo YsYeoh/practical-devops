@@ -75,7 +75,61 @@ Do not click Save yet — you need to add credentials first.
 
 ---
 
-## Part 3: Create the Jenkinsfile
+## Part 3: Add Environment File Credentials
+
+Your `docker-compose.yml` loads runtime variables from a `.env` file (see Chapter 4). That file must **not** be committed to Git — it is listed in `.gitignore` — so Jenkins will not have it after cloning your repository.
+
+The long-term fix is to store the file in **Jenkins Credentials** and inject it into the workspace during deploy. Jenkins keeps the secret encrypted at rest and only exposes it to builds that explicitly request it.
+
+### Step 3.1 — Confirm Your Local `.env` File
+
+On your development machine (or wherever you run the app locally), your `.env` should match Chapter 4:
+
+```env
+MONGODB_URI=mongodb://admin:password123@mongodb:27017
+NODE_ENV=production
+PORT=3000
+```
+
+> In production you would use stronger passwords and rotate them regularly. Chapter 11 covers Docker Secrets and more advanced vault options.
+
+### Step 3.2 — Add a Secret File Credential in Jenkins
+
+1. In Jenkins, go to **Manage Jenkins** → **Credentials** → **System** → **Global credentials (unrestricted)** → **Add Credentials**
+2. Fill in:
+
+   | Field | Value |
+   |---|---|
+   | Kind | **Secret file** |
+   | File | Upload your `.env` file (Choose File → select the `.env` from your project) |
+   | ID | `app-env-file` |
+   | Description | `Application .env for docker compose deploy` |
+
+3. Click **Create**
+
+**Why Secret file instead of plain text?**
+
+| Approach | Problem |
+|---|---|
+| Commit `.env` to Git | Secrets become public if the repo is shared or leaked |
+| Hardcode values in `Jenkinsfile` | Visible to anyone who can read the pipeline; hard to rotate |
+| Copy `.env` manually into the workspace | Workspace is wiped between builds; easy to forget |
+| **Secret file credential** | Encrypted in Jenkins, injected only at deploy time, easy to update without code changes |
+
+> The credential **ID** must be exactly `app-env-file` — the `Jenkinsfile` in the next section references it by name.
+
+### Step 3.3 — Updating Secrets Later
+
+When you change environment variables (new API key, rotated password):
+
+1. Edit `.env` locally
+2. In Jenkins → **Credentials** → find `app-env-file` → **Update**
+3. Upload the new file
+4. Re-run the pipeline (no Git push required unless application code changed)
+
+---
+
+## Part 4: Create the Jenkinsfile
 
 Now create the pipeline definition file in your project root on your server (or on your local machine, commit it, and push to GitHub):
 
@@ -104,6 +158,9 @@ pipeline {
 
         stage('Deploy Containers') {
             steps {
+                withCredentials([file(credentialsId: 'app-env-file', variable: 'ENV_FILE')]) {
+                    sh 'cp "$ENV_FILE" .env'
+                }
                 sh 'docker compose up -d'
             }
         }
@@ -125,7 +182,7 @@ pipeline {
 |---|---|
 | **Clone Repository** | Pulls the latest code from the `main` branch of your GitHub repo |
 | **Build Docker Images** | Runs `docker compose build` to rebuild images if the Dockerfile or app code changed |
-| **Deploy Containers** | Runs `docker compose up -d` to start (or update) running containers |
+| **Deploy Containers** | Copies `.env` from the Jenkins Secret file credential, then runs `docker compose up -d` |
 | **Cleanup** | Removes unused Docker images with `docker image prune -f` to free disk space |
 
 ### Why the Cleanup Stage Matters
@@ -142,11 +199,26 @@ The `prune -f` command removes:
 
 > **Pro tip:** Add `docker system prune -af` for a more aggressive cleanup, but be aware this removes all stopped containers and unused networks too.
 
+### How the Deploy Stage Injects `.env`
+
+```groovy
+withCredentials([file(credentialsId: 'app-env-file', variable: 'ENV_FILE')]) {
+    sh 'cp "$ENV_FILE" .env'
+}
+```
+
+1. Jenkins decrypts the uploaded Secret file for this build only
+2. It exposes the path to the temporary file as the `ENV_FILE` environment variable
+3. The `cp` command copies it to `.env` in the workspace where `docker compose` expects it
+4. Jenkins deletes the temporary file when the stage finishes
+
+The `.env` file never appears in Git, never sits permanently on disk in the workspace, and is not printed in the console output.
+
 ---
 
-## Part 4: Test the Pipeline
+## Part 5: Test the Pipeline
 
-### Step 4.1 — Initial Manual Run
+### Step 5.1 — Initial Manual Run
 
 1. In Jenkins, go to your pipeline (`practical-devops-pipeline`)
 2. Click **Build Now** (left sidebar)
@@ -167,7 +239,7 @@ Pruning unused images...
 Finished: SUCCESS
 ```
 
-### Step 4.2 — Fixing Permission Issues
+### Step 5.2 — Fixing Permission Issues
 
 If you see `permission denied` when Jenkins tries to run Docker commands:
 
@@ -183,11 +255,11 @@ sudo systemctl restart jenkins
 
 ---
 
-## Part 5: Set Up Automatic Deployment with Webhooks
+## Part 6: Set Up Automatic Deployment with Webhooks
 
 Now configure GitHub to notify Jenkins whenever you push code.
 
-### Step 5.1 — Add a Webhook in GitHub
+### Step 6.1 — Add a Webhook in GitHub
 
 1. Go to your GitHub repository → **Settings** → **Webhooks** → **Add webhook**
 2. Fill in:
@@ -202,7 +274,7 @@ Now configure GitHub to notify Jenkins whenever you push code.
 
 > **Note:** The trailing slash in `github-webhook/` is required.
 
-### Step 5.2 — Verify the Webhook
+### Step 6.2 — Verify the Webhook
 
 After adding the webhook, GitHub sends a test ping. In the webhook settings page, you should see a green checkmark indicating the ping was delivered successfully.
 
@@ -211,7 +283,7 @@ If the ping failed:
 - Check your server's firewall: `sudo ufw status`
 - Check your cloud provider's firewall/security group settings
 
-### Step 5.3 — Configure Jenkins to Accept Webhooks
+### Step 6.3 — Configure Jenkins to Accept Webhooks
 
 Jenkins should be ready to receive webhooks automatically if the **GitHub Integration Plugin** is installed.
 
@@ -226,11 +298,11 @@ To verify:
 
 ---
 
-## Part 6: Test the Full CI/CD Flow
+## Part 7: Test the Full CI/CD Flow
 
 Now test the entire pipeline end-to-end:
 
-### Step 6.1 — Make a Code Change
+### Step 7.1 — Make a Code Change
 
 Make a small change to your NextJS app (edit the homepage text, for example):
 
@@ -239,7 +311,7 @@ Make a small change to your NextJS app (edit the homepage text, for example):
 echo "console.log('Auto-deploy test');" >> app/page.js
 ```
 
-### Step 6.2 — Commit and Push
+### Step 7.2 — Commit and Push
 
 ```bash
 git add .
@@ -247,7 +319,7 @@ git commit -m "Test auto-deploy pipeline"
 git push origin main
 ```
 
-### Step 6.3 — Watch the Automation
+### Step 7.3 — Watch the Automation
 
 1. In Jenkins, your pipeline should trigger automatically within seconds of the push
 2. Watch the console output as Jenkins:
@@ -271,6 +343,8 @@ Clones the latest code
         ↓
 Runs docker compose build
         ↓
+Injects .env from Jenkins Credentials
+        ↓
 Runs docker compose up -d
         ↓
 Application updates live
@@ -285,6 +359,7 @@ Cleanup removes old images
 Before moving on, confirm:
 
 - [x] Jenkins can manually run the pipeline and it completes successfully
+- [x] Secret file credential `app-env-file` is configured in Jenkins
 - [x] The `Jenkinsfile` is committed to your GitHub repository
 - [x] GitHub webhook is configured and the test ping succeeded
 - [x] Jenkins pipeline triggers automatically when you push code
@@ -301,6 +376,8 @@ Before moving on, confirm:
 | Webhook ping returns `301` or `Connection refused` | Jenkins may not be accessible from the internet. Check firewall (UFW) and cloud security group. For testing, you can use `ngrok` to expose port 8080 |
 | Pipeline fails at `docker compose build` | Ensure the Jenkinsfile's working directory contains `docker-compose.yml`. The `git` step should clone into the workspace |
 | `permission denied while trying to connect to the Docker daemon` | Jenkins user needs docker group membership and a restart |
+| `env file .../.env not found` when running `docker compose up` | `.env` is not in Git. Add the **Secret file** credential `app-env-file` in Jenkins (Part 3) and ensure the `Jenkinsfile` deploy stage uses `withCredentials` |
+| `Could not find credentials entry with ID 'app-env-file'` | Create the Secret file credential with ID exactly `app-env-file`, or update the `credentialsId` in the `Jenkinsfile` to match your credential ID |
 
 ---
 
